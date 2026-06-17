@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-17
+
+### Changed
+
+- Rewrote wenv as a `#![no_std]` program that talks to the OS directly, dropping
+  `std`, `crossterm`, and (on Windows) the C runtime entirely. The Windows binary
+  now depends only on `kernel32`/`shell32` (which ship with the OS) and is ~36 KB
+  — down from ~200 KB — with nothing to install. Built on plain stable Rust.
+- Unix builds use the system `libc` (always present); no runtime install needed.
+
+### Removed
+
+- The optional nightly `build-std` size build and its `scripts/build-min.*` /
+  `github-build-setup` CI hook are gone — the default stable build is now the
+  small one, so the nightly machinery is no longer needed.
+
+### Notes
+
+- Behavior and keybindings are unchanged from 0.3.0. When stdout/stdin is not a
+  terminal, wenv prints the plain summary instead of the interactive UI.
+
 ## [0.3.0] - 2026-06-17
 
 ### Changed
@@ -53,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prints a compact colored summary on quit; color is suppressed when stdout is
   not a terminal or `NO_COLOR` is set.
 
+[0.4.0]: https://github.com/cinderblock/wenv/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cinderblock/wenv/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cinderblock/wenv/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cinderblock/wenv/releases/tag/v0.1.0

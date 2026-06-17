@@ -17,6 +17,3 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
-# Extra steps injected into each per-target build job: build releases on nightly
-# with build-std + the immediate-abort panic strategy for a much smaller binary.
-github-build-setup = "./build-setup.yml"

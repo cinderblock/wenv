@@ -1,4 +1,9 @@
-# Statically link the MSVC C runtime on Windows so the released .exe is fully
-# self-contained (no dependency on the VC++ redistributable DLLs).
-[target.'cfg(all(windows, target_env = "msvc"))']
-rustflags = ["-C", "target-feature=+crt-static"]
+# no_std / no-CRT build: we link only OS DLLs (kernel32, shell32 on Windows),
+# so there is no C runtime to statically link. The crate provides its own entry
+# point (mainCRTStartup in src/sys/windows.rs) and global allocator, so the
+# linker needs to be told the entry and subsystem explicitly.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "link-arg=/ENTRY:mainCRTStartup",
+    "-C", "link-arg=/SUBSYSTEM:CONSOLE",
+]

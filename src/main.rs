@@ -1,15 +1,21 @@
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
+
+extern crate alloc;
+
 mod env_file;
+#[cfg(all(windows, not(test)))]
+mod rt;
 mod screen;
+mod sys;
 
-use std::env;
-use std::io;
-use std::path::PathBuf;
-
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::style::Color;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use env_file::EnvFile;
-use screen::{Buffer, Style, Viewport};
+use screen::{Buffer, Color, Style, Viewport};
+use sys::Key;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Target {
@@ -70,7 +76,7 @@ struct EditState {
 }
 
 struct App {
-    dir: PathBuf,
+    dir: String,
     example: EnvFile,
     env: EnvFile,
     local: EnvFile,
@@ -84,11 +90,20 @@ struct App {
     quit: bool,
 }
 
+fn join(dir: &str, name: &str) -> String {
+    let mut p = String::from(dir);
+    if !p.is_empty() && !p.ends_with('/') && !p.ends_with('\\') {
+        p.push('/');
+    }
+    p.push_str(name);
+    p
+}
+
 impl App {
-    fn new(dir: PathBuf) -> Self {
-        let example = EnvFile::load(dir.join(".env.example"));
-        let env = EnvFile::load(dir.join(".env"));
-        let local = EnvFile::load(dir.join(".env.local"));
+    fn new(dir: String) -> Self {
+        let example = EnvFile::load(join(&dir, ".env.example"));
+        let env = EnvFile::load(join(&dir, ".env"));
+        let local = EnvFile::load(join(&dir, ".env.local"));
         let mut app = App {
             dir,
             example,
@@ -111,9 +126,9 @@ impl App {
     }
 
     fn rescan(&mut self) {
-        self.example = EnvFile::load(self.dir.join(".env.example"));
-        self.env = EnvFile::load(self.dir.join(".env"));
-        self.local = EnvFile::load(self.dir.join(".env.local"));
+        self.example = EnvFile::load(join(&self.dir, ".env.example"));
+        self.env = EnvFile::load(join(&self.dir, ".env"));
+        self.local = EnvFile::load(join(&self.dir, ".env.local"));
         let prev = self.selected_key();
         self.rebuild_vars();
         self.selected = prev
@@ -177,9 +192,9 @@ impl App {
 
     fn begin_edit(&mut self) {
         if let Some(key) = self.selected_key() {
-            self.edit = EditState { key: key.clone(), input: String::new(), reveal: false };
-            self.mode = Mode::Edit;
             self.message = format!("Editing {} in {}", key, self.target.filename());
+            self.edit = EditState { key, input: String::new(), reveal: false };
+            self.mode = Mode::Edit;
         }
     }
 
@@ -187,7 +202,7 @@ impl App {
         let key = self.edit.key.clone();
         let value = self.edit.input.clone();
         let target = self.target;
-        let result = {
+        let ok = {
             let file = match target {
                 Target::Env => &mut self.env,
                 Target::Local => &mut self.local,
@@ -195,14 +210,11 @@ impl App {
             file.set(&key, &value);
             file.save()
         };
-        match result {
-            Ok(()) => {
-                self.message = format!("Wrote {} -> {}", key, target.filename());
-                self.record_change(key, target.filename());
-            }
-            Err(e) => {
-                self.message = format!("ERROR writing {}: {}", target.filename(), e);
-            }
+        if ok {
+            self.message = format!("Wrote {} -> {}", key, target.filename());
+            self.record_change(key, target.filename());
+        } else {
+            self.message = format!("ERROR writing {}", target.filename());
         }
         self.mode = Mode::List;
         self.rescan();
@@ -216,57 +228,85 @@ impl App {
     }
 }
 
-fn main() -> io::Result<()> {
-    let dir = match env::args_os().nth(1) {
-        Some(arg) => PathBuf::from(arg),
-        None => env::current_dir()?,
-    };
-    if !dir.is_dir() {
-        eprintln!("wenv: not a directory: {}", dir.display());
-        std::process::exit(2);
-    }
-    let mut app = App::new(dir);
-    // Inline viewport: a fixed region that stays in scrollback rather than taking
-    // over the whole screen. Size to the var count, within bounds.
-    let rows = (app.vars.len().max(1)).min(12) as u16;
-    let height = (rows + 8).min(24);
-    let vp = screen::init(height)?;
-    let res = run(&vp, &mut app);
-    // Wipe the inline UI region, then leave only a plain-text summary in scrollback.
-    let _ = screen::teardown(&vp);
-    print_summary(&app);
-    res
+#[cfg(all(windows, not(test)))]
+#[unsafe(no_mangle)]
+pub extern "C" fn mainCRTStartup() -> ! {
+    let code = real_main();
+    sys::exit(code)
 }
 
-fn run(vp: &Viewport, app: &mut App) -> io::Result<()> {
-    let mut out = io::stdout();
+#[cfg(all(unix, not(test)))]
+#[unsafe(no_mangle)]
+pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
+    sys::set_args(argc, argv);
+    real_main()
+}
+
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    sys::write_stdout(b"\x1b[0m\r\nwenv panicked\r\n");
+    sys::exit(101)
+}
+
+fn real_main() -> i32 {
+    let dir = match sys::args().into_iter().nth(1) {
+        Some(a) => a,
+        None => match sys::cwd() {
+            Some(d) => d,
+            None => {
+                sys::write_stdout(b"wenv: cannot determine current directory\r\n");
+                return 2;
+            }
+        },
+    };
+    if !sys::is_dir(&dir) {
+        let mut m = String::from("wenv: not a directory: ");
+        m.push_str(&dir);
+        m.push_str("\r\n");
+        sys::write_stdout(m.as_bytes());
+        return 2;
+    }
+
+    let app = App::new(dir);
+    // No console (piped/redirected): skip the interactive UI, just print state.
+    if !sys::interactive() {
+        print_summary(&app);
+        return 0;
+    }
+    let mut app = app;
+    let rows = (app.vars.len().max(1)).min(12) as u16;
+    let height = (rows + 8).min(24);
+    let vp = screen::init(height);
+    run(&vp, &mut app);
+    screen::teardown(&vp);
+    print_summary(&app);
+    0
+}
+
+fn run(vp: &Viewport, app: &mut App) {
     while !app.quit {
         let mut buf = Buffer::new(vp.width(), vp.height);
         draw(&mut buf, app, vp.height);
-        buf.flush(&mut out, vp.ox, vp.oy)?;
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            match app.mode {
-                Mode::List => handle_list_key(app, key.code),
-                Mode::Edit => handle_edit_key(app, key.code, key.modifiers),
-            }
+        buf.flush(vp.ox, vp.oy);
+        let key = sys::read_key();
+        match app.mode {
+            Mode::List => handle_list_key(app, key),
+            Mode::Edit => handle_edit_key(app, key),
         }
     }
-    Ok(())
 }
 
-fn handle_list_key(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
-        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-        KeyCode::Left | KeyCode::Char('h') => app.target = Target::Env,
-        KeyCode::Right | KeyCode::Char('l') => app.target = Target::Local,
-        KeyCode::Tab => app.target = app.target.toggled(),
-        KeyCode::Enter => app.begin_edit(),
-        KeyCode::Char('s') => {
+fn handle_list_key(app: &mut App, key: Key) {
+    match key {
+        Key::Char('q') | Key::Esc => app.quit = true,
+        Key::Up | Key::Char('k') => app.move_selection(-1),
+        Key::Down | Key::Char('j') => app.move_selection(1),
+        Key::Left | Key::Char('h') => app.target = Target::Env,
+        Key::Right | Key::Char('l') => app.target = Target::Local,
+        Key::Tab => app.target = app.target.toggled(),
+        Key::Enter => app.begin_edit(),
+        Key::Char('s') => {
             app.rescan();
             app.message = "Rescanned".to_string();
         }
@@ -274,23 +314,21 @@ fn handle_list_key(app: &mut App, code: KeyCode) {
     }
 }
 
-fn handle_edit_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
-    match code {
-        KeyCode::Esc => {
+fn handle_edit_key(app: &mut App, key: Key) {
+    match key {
+        Key::Esc => {
             app.mode = Mode::List;
             app.message = "Edit cancelled".to_string();
         }
-        KeyCode::Enter => app.confirm_edit(),
-        KeyCode::Backspace => {
+        Key::Enter => app.confirm_edit(),
+        Key::Backspace => {
             app.edit.input.pop();
         }
-        KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => {
+        Key::Ctrl('r') => {
             app.edit.reveal = !app.edit.reveal;
         }
-        KeyCode::Char(c) => {
-            if !mods.contains(KeyModifiers::CONTROL) {
-                app.edit.input.push(c);
-            }
+        Key::Char(c) => {
+            app.edit.input.push(c);
         }
         _ => {}
     }
@@ -314,7 +352,7 @@ fn draw_header(buf: &mut Buffer, app: &App) {
     let w = buf.w;
     let max_x = w.saturating_sub(1);
     buf.draw_box(0, 0, w, 4, " wenv ", true, Style::new());
-    buf.put(1, 1, max_x, &app.dir.display().to_string(), Style::new().bold());
+    buf.put(1, 1, max_x, &app.dir, Style::new().bold());
     let mut x = buf.put(1, 2, max_x, "files: ", Style::new());
     x = buf.put(x, 2, max_x, ".env", present(app.env.exists));
     x = buf.put(x, 2, max_x, "  ", Style::new());
@@ -336,7 +374,6 @@ fn draw_table(buf: &mut Buffer, app: &App, height: u16) {
     let first_row_y = y0 + 2;
     let visible = (table_h as usize).saturating_sub(3);
 
-    // Column geometry: KEY then two equal file columns.
     let longest = app.vars.iter().map(|v| v.key.chars().count() as u16).max().unwrap_or(6);
     let avail = max_x.saturating_sub(inner_x);
     let key_w = longest.clamp(6, avail.saturating_sub(20).max(6));
@@ -345,13 +382,11 @@ fn draw_table(buf: &mut Buffer, app: &App, height: u16) {
     let file_w = max_x.saturating_sub(env_x).saturating_sub(gap) / 2;
     let local_x = env_x + file_w + gap;
 
-    // Column labels; the active file column is highlighted.
     buf.put(inner_x, label_y, env_x, "KEY", Style::new().dim());
-    let env_label = Style::fg(Color::Yellow).bold();
-    let local_label = Style::fg(Color::Yellow).bold();
+    let active = Style::fg(Color::Yellow).bold();
     let dim = Style::new().dim();
-    buf.put(env_x, label_y, local_x, ".env", if app.target == Target::Env { env_label } else { dim });
-    buf.put(local_x, label_y, max_x, ".env.local", if app.target == Target::Local { local_label } else { dim });
+    buf.put(env_x, label_y, local_x, ".env", if app.target == Target::Env { active } else { dim });
+    buf.put(local_x, label_y, max_x, ".env.local", if app.target == Target::Local { active } else { dim });
 
     if app.vars.is_empty() {
         buf.put(
@@ -385,7 +420,11 @@ fn draw_cell(buf: &mut Buffer, app: &App, key: &str, col: Target, x: u16, y: u16
         let shown = if app.edit.reveal {
             app.edit.input.clone()
         } else {
-            "•".repeat(app.edit.input.chars().count())
+            let mut s = String::new();
+            for _ in 0..app.edit.input.chars().count() {
+                s.push('•');
+            }
+            s
         };
         let cap = (max_x.saturating_sub(x)).saturating_sub(1) as usize;
         let text = clip_tail(&shown, cap);
@@ -426,7 +465,11 @@ fn fingerprint(v: &str) -> String {
     let chars: Vec<char> = v.chars().collect();
     let n = chars.len();
     if n <= PRE + SUF + 1 {
-        return "\u{2022}".repeat(n.min(6));
+        let mut s = String::new();
+        for _ in 0..n.min(6) {
+            s.push('\u{2022}');
+        }
+        return s;
     }
     let pre: String = chars[..PRE].iter().collect();
     let suf: String = chars[n - SUF..].iter().collect();
@@ -456,82 +499,76 @@ fn clip_tail(s: &str, width: usize) -> String {
     }
 }
 
-/// True when it's safe to emit ANSI color: stdout is a real terminal, NO_COLOR is
-/// not set, and the platform supports ANSI (on Windows this also enables VT
-/// processing). Result of supports_ansi() is cached by crossterm.
 fn color_enabled() -> bool {
-    use std::io::IsTerminal;
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
+    sys::env_var("NO_COLOR").is_none() && sys::stdout_is_tty()
+}
+
+fn paint(out: &mut String, on: bool, code: &str, text: &str) {
+    if on {
+        out.push_str("\x1b[");
+        out.push_str(code);
+        out.push('m');
+        out.push_str(text);
+        out.push_str("\x1b[0m");
+    } else {
+        out.push_str(text);
     }
-    if !std::io::stdout().is_terminal() {
-        return false;
-    }
-    #[cfg(windows)]
-    {
-        crossterm::ansi_support::supports_ansi()
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var("TERM").map_or(true, |t| t != "dumb")
+}
+
+fn status_code(s: Status) -> &'static str {
+    match s {
+        Status::Set => "32",
+        Status::Empty => "33",
+        Status::Unset => "90",
     }
 }
 
 fn print_summary(app: &App) {
-    use crossterm::style::{Color, Stylize};
-
     let color = color_enabled();
-    let paint = |s: &str, c: Color| -> String {
-        if color {
-            s.with(c).to_string()
-        } else {
-            s.to_string()
-        }
-    };
-    let bold = |s: &str| -> String {
-        if color {
-            s.bold().to_string()
-        } else {
-            s.to_string()
-        }
-    };
-    let status_color = |s: Status| match s {
-        Status::Set => Color::Green,
-        Status::Empty => Color::Yellow,
-        Status::Unset => Color::DarkGrey,
-    };
+    let mut out = String::new();
 
-    println!("{}  {}", bold("wenv"), paint(&app.dir.display().to_string(), Color::DarkGrey));
+    paint(&mut out, color, "1", "wenv");
+    out.push_str("  ");
+    paint(&mut out, color, "90", &app.dir);
+    out.push_str("\r\n");
 
     if app.vars.is_empty() {
-        println!(
-            "  {}",
-            paint("no variables found (.env / .env.local / .env.example)", Color::DarkGrey)
-        );
+        out.push_str("  ");
+        paint(&mut out, color, "90", "no variables found (.env / .env.local / .env.example)");
+        out.push_str("\r\n");
     } else {
-        println!("  {}", bold("variables:"));
+        out.push_str("  ");
+        paint(&mut out, color, "1", "variables:");
+        out.push_str("\r\n");
         for v in &app.vars {
-            let tag = paint(&format!("{:<5}", status_word(v.status)), status_color(v.status));
-            println!("    [{}] {:<28} {}", tag, v.key, paint(&format!("({})", v.source), Color::DarkGrey));
+            out.push_str("    [");
+            paint(&mut out, color, status_code(v.status), &format!("{:<5}", status_word(v.status)));
+            out.push_str("] ");
+            out.push_str(&format!("{:<28}", v.key));
+            out.push(' ');
+            paint(&mut out, color, "90", &format!("({})", v.source));
+            out.push_str("\r\n");
         }
     }
 
     if !app.changes.is_empty() {
-        println!("  {}", bold("changed this session:"));
+        out.push_str("  ");
+        paint(&mut out, color, "1", "changed this session:");
+        out.push_str("\r\n");
         for c in &app.changes {
             let status = app.vars.iter().find(|v| v.key == c.key).map(|v| v.status);
             let word = status.map(status_word).unwrap_or("?");
-            let colored = match status {
-                Some(s) => paint(word, status_color(s)),
-                None => word.to_string(),
-            };
-            println!(
-                "    {:<28} {} {} {}",
-                c.key,
-                colored,
-                paint("->", Color::DarkGrey),
-                paint(c.target, Color::Cyan)
-            );
+            out.push_str("    ");
+            out.push_str(&format!("{:<28} ", c.key));
+            match status {
+                Some(s) => paint(&mut out, color, status_code(s), word),
+                None => out.push_str(word),
+            }
+            out.push(' ');
+            paint(&mut out, color, "90", "->");
+            out.push(' ');
+            paint(&mut out, color, "36", c.target);
+            out.push_str("\r\n");
         }
     }
 
@@ -543,10 +580,13 @@ fn print_summary(app: &App) {
             Status::Unset => unset += 1,
         }
     }
-    println!(
-        "  {} set  {} empty  {} unset",
-        paint(&set.to_string(), Color::Green),
-        paint(&empty.to_string(), Color::Yellow),
-        paint(&unset.to_string(), Color::DarkGrey)
-    );
+    out.push_str("  ");
+    paint(&mut out, color, "32", &set.to_string());
+    out.push_str(" set  ");
+    paint(&mut out, color, "33", &empty.to_string());
+    out.push_str(" empty  ");
+    paint(&mut out, color, "90", &unset.to_string());
+    out.push_str(" unset\r\n");
+
+    sys::write_stdout(out.as_bytes());
 }

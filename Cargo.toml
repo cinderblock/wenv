@@ -1,6 +1,6 @@
 [package]
 name = "wenv"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["Cameron Tacklind <cameron@tacklind.com>"]
 description = "A terminal UI for viewing and setting .env secrets without revealing their values"
@@ -11,7 +11,14 @@ keywords = ["dotenv", "env", "secrets", "tui", "cli"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-crossterm = "0.29.0"
+
+# Unix only: FFI declarations for the system libc (always present at runtime —
+# nothing to install). Windows talks to kernel32 directly with no extra crate.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", default-features = false }
+
+[profile.dev]
+panic = "abort"   # no_std non-test builds have no unwinder
 
 [profile.release]
 opt-level = "z"   # optimize for size

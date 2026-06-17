@@ -1,19 +1,22 @@
-use std::fs;
-use std::io;
-use std::path::PathBuf;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use crate::sys;
 
 /// A parsed `.env`-style file that preserves its original lines so writes keep
 /// comments, blank lines, and ordering intact.
 pub struct EnvFile {
-    pub path: PathBuf,
+    pub path: String,
     pub exists: bool,
     lines: Vec<String>,
 }
 
 impl EnvFile {
-    pub fn load(path: PathBuf) -> Self {
-        match fs::read_to_string(&path) {
-            Ok(content) => {
+    pub fn load(path: String) -> Self {
+        match sys::read_file(&path) {
+            Some(bytes) => {
+                let content = String::from_utf8_lossy(&bytes);
                 // Split keeping logical lines; trailing newline shouldn't create an
                 // empty final entry we then re-append.
                 let mut lines: Vec<String> =
@@ -23,7 +26,7 @@ impl EnvFile {
                 }
                 EnvFile { path, exists: true, lines }
             }
-            Err(_) => EnvFile { path, exists: false, lines: Vec::new() },
+            None => EnvFile { path, exists: false, lines: Vec::new() },
         }
     }
 
@@ -56,8 +59,6 @@ impl EnvFile {
     /// Set (or insert) a key's value in memory.
     pub fn set(&mut self, key: &str, value: &str) {
         let formatted = format_assignment(key, value);
-        // Replace the last existing assignment for this key; collapse earlier dups
-        // are left as-is to avoid surprising reordering.
         let mut last_idx = None;
         for (i, line) in self.lines.iter().enumerate() {
             if let Some((k, _)) = parse_line(line) {
@@ -72,14 +73,18 @@ impl EnvFile {
         }
     }
 
-    pub fn save(&mut self) -> io::Result<()> {
+    /// Write the file back to disk. Returns false on failure.
+    pub fn save(&mut self) -> bool {
         let mut content = self.lines.join("\n");
         if !content.is_empty() {
             content.push('\n');
         }
-        fs::write(&self.path, content)?;
-        self.exists = true;
-        Ok(())
+        if sys::write_file(&self.path, content.as_bytes()) {
+            self.exists = true;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -167,9 +172,7 @@ fn format_value(value: &str) -> String {
     if value.is_empty() {
         return String::new();
     }
-    let safe = value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "._-/:@+,".contains(c));
+    let safe = value.chars().all(|c| c.is_ascii_alphanumeric() || "._-/:@+,".contains(c));
     if safe {
         return value.to_string();
     }
@@ -192,12 +195,13 @@ fn format_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
 
-    fn tmp(name: &str) -> PathBuf {
-        let mut p = env::temp_dir();
+    fn tmp(name: &str) -> String {
+        let mut p: PathBuf = std::env::temp_dir();
         p.push(format!("wenv_test_{}_{}", std::process::id(), name));
-        p
+        p.to_string_lossy().into_owned()
     }
 
     #[test]
@@ -220,11 +224,10 @@ mod tests {
         fs::write(&p, "# header\nA=old\n\n# section\nB=keep\n").unwrap();
         let mut f = EnvFile::load(p.clone());
         f.set("A", "new value!"); // needs quoting (space + !)
-        f.set("C", "added");      // appended
-        f.save().unwrap();
+        f.set("C", "added"); // appended
+        assert!(f.save());
         let out = fs::read_to_string(&p).unwrap();
         assert_eq!(out, "# header\nA=\"new value!\"\n\n# section\nB=keep\nC=added\n");
-        // round-trip
         let f2 = EnvFile::load(p.clone());
         assert_eq!(f2.get("A").as_deref(), Some("new value!"));
         assert_eq!(f2.get("C").as_deref(), Some("added"));
@@ -236,7 +239,7 @@ mod tests {
         let p = tmp("empty.env");
         let mut f = EnvFile::load(p.clone());
         f.set("TOKEN", "");
-        f.save().unwrap();
+        assert!(f.save());
         assert_eq!(fs::read_to_string(&p).unwrap(), "TOKEN=\n");
         fs::remove_file(p).ok();
     }

@@ -23,6 +23,10 @@ and anything you changed.
 - Writes preserve existing comments, ordering, and blank lines, and quote values
   only when needed.
 - On quit, clears the UI and leaves a plain summary in your scrollback.
+- Tiny and self-contained: built `#![no_std]` with no C runtime and no external
+  crates beyond `libc` on Unix. The binary depends only on libraries that ship
+  with the OS (on Windows just `kernel32`/`shell32` — no VC++ redistributable),
+  so there is nothing to install.
 
 ## Install
 
@@ -34,29 +38,13 @@ your `PATH`.
 
 ### Build from source
 
-Requires a recent Rust toolchain.
+Requires a recent stable Rust toolchain — no nightly, no extra components.
 
 ```sh
 cargo install --path .
 # or
-cargo build --release   # binary at target/release/wenv
+cargo build --release   # binary at target/release/wenv (~36 KB on Windows)
 ```
-
-#### Size-optimized build (optional)
-
-A much smaller binary can be built on the nightly toolchain by rebuilding the
-standard library with the `immediate-abort` panic strategy (this strips
-unwinding and panic-formatting machinery). One-time setup, then build:
-
-```sh
-rustup toolchain install nightly --component rust-src
-./scripts/build-min.sh           # or: ./scripts/build-min.ps1 on Windows
-```
-
-The binary lands at `target/<host-triple>/release/wenv`. This shrinks the
-release binary by roughly half versus a plain `cargo build --release`. It is not
-the default because it requires nightly; the stock `cargo build --release` stays
-on stable.
 
 ## Usage
 
