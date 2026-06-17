@@ -13,3 +13,10 @@ categories = ["command-line-utilities"]
 [dependencies]
 crossterm = "0.29.0"
 ratatui = "0.30.1"
+
+[profile.release]
+opt-level = "z"   # optimize for size
+lto = true        # link-time optimization across crates
+codegen-units = 1 # better optimization at the cost of compile time
+panic = "abort"   # drop unwinding tables
+strip = true      # strip symbols from the binary
