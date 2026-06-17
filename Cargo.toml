@@ -20,3 +20,8 @@ lto = true        # link-time optimization across crates
 codegen-units = 1 # better optimization at the cost of compile time
 panic = "abort"   # drop unwinding tables
 strip = true      # strip symbols from the binary
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
