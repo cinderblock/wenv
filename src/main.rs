@@ -1,19 +1,15 @@
 mod env_file;
+mod screen;
 
 use std::env;
+use std::io;
 use std::path::PathBuf;
 
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::style::Color;
+
 use env_file::EnvFile;
-use ratatui::backend::Backend;
-use ratatui::crossterm::cursor::MoveTo;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::disable_raw_mode;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
-use ratatui::{DefaultTerminal, Frame, TerminalOptions, Viewport};
+use screen::{Buffer, Style, Viewport};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Target {
@@ -79,7 +75,7 @@ struct App {
     env: EnvFile,
     local: EnvFile,
     vars: Vec<VarEntry>,
-    list_state: ListState,
+    selected: Option<usize>,
     target: Target,
     mode: Mode,
     edit: EditState,
@@ -99,7 +95,7 @@ impl App {
             env,
             local,
             vars: Vec::new(),
-            list_state: ListState::default(),
+            selected: None,
             target: Target::Env,
             mode: Mode::List,
             edit: EditState { key: String::new(), input: String::new(), reveal: false },
@@ -109,7 +105,7 @@ impl App {
         };
         app.rebuild_vars();
         if !app.vars.is_empty() {
-            app.list_state.select(Some(0));
+            app.selected = Some(0);
         }
         app
     }
@@ -120,27 +116,18 @@ impl App {
         self.local = EnvFile::load(self.dir.join(".env.local"));
         let prev = self.selected_key();
         self.rebuild_vars();
-        let idx = prev
+        self.selected = prev
             .and_then(|k| self.vars.iter().position(|v| v.key == k))
             .or(if self.vars.is_empty() { None } else { Some(0) });
-        self.list_state.select(idx);
     }
 
     fn rebuild_vars(&mut self) {
         let mut order: Vec<String> = Vec::new();
-        for k in self.example.keys() {
-            if !order.contains(&k) {
-                order.push(k);
-            }
-        }
-        for k in self.env.keys() {
-            if !order.contains(&k) {
-                order.push(k);
-            }
-        }
-        for k in self.local.keys() {
-            if !order.contains(&k) {
-                order.push(k);
+        for src in [&self.example, &self.env, &self.local] {
+            for k in src.keys() {
+                if !order.contains(&k) {
+                    order.push(k);
+                }
             }
         }
 
@@ -168,10 +155,7 @@ impl App {
     }
 
     fn selected_key(&self) -> Option<String> {
-        self.list_state
-            .selected()
-            .and_then(|i| self.vars.get(i))
-            .map(|v| v.key.clone())
+        self.selected.and_then(|i| self.vars.get(i)).map(|v| v.key.clone())
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -179,16 +163,23 @@ impl App {
             return;
         }
         let len = self.vars.len() as isize;
-        let cur = self.list_state.selected().unwrap_or(0) as isize;
+        let cur = self.selected.unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(len);
-        self.list_state.select(Some(next as usize));
+        self.selected = Some(next as usize);
+    }
+
+    fn file(&self, col: Target) -> &EnvFile {
+        match col {
+            Target::Env => &self.env,
+            Target::Local => &self.local,
+        }
     }
 
     fn begin_edit(&mut self) {
         if let Some(key) = self.selected_key() {
-            self.edit = EditState { key, input: String::new(), reveal: false };
+            self.edit = EditState { key: key.clone(), input: String::new(), reveal: false };
             self.mode = Mode::Edit;
-            self.message.clear();
+            self.message = format!("Editing {} in {}", key, self.target.filename());
         }
     }
 
@@ -225,7 +216,7 @@ impl App {
     }
 }
 
-fn main() -> std::io::Result<()> {
+fn main() -> io::Result<()> {
     let dir = match env::args_os().nth(1) {
         Some(arg) => PathBuf::from(arg),
         None => env::current_dir()?,
@@ -235,23 +226,234 @@ fn main() -> std::io::Result<()> {
         std::process::exit(2);
     }
     let mut app = App::new(dir);
-    // Inline viewport: render in a fixed region that stays in scrollback rather
-    // than taking over the whole screen. Size to the var count, within bounds.
+    // Inline viewport: a fixed region that stays in scrollback rather than taking
+    // over the whole screen. Size to the var count, within bounds.
     let rows = (app.vars.len().max(1)).min(12) as u16;
     let height = (rows + 8).min(24);
-    let mut terminal =
-        ratatui::init_with_options(TerminalOptions { viewport: Viewport::Inline(height) });
-    let res = run(&mut terminal, &mut app);
+    let vp = screen::init(height)?;
+    let res = run(&vp, &mut app);
     // Wipe the inline UI region, then leave only a plain-text summary in scrollback.
-    // clear() restores the cursor to the viewport bottom, so move it back to the
-    // viewport origin before printing or the summary lands below blank lines.
-    let origin = terminal.get_frame().area();
-    let _ = terminal.clear();
-    let _ = terminal.backend_mut().flush();
-    let _ = disable_raw_mode();
-    let _ = execute!(std::io::stdout(), MoveTo(origin.x, origin.y));
+    let _ = screen::teardown(&vp);
     print_summary(&app);
     res
+}
+
+fn run(vp: &Viewport, app: &mut App) -> io::Result<()> {
+    let mut out = io::stdout();
+    while !app.quit {
+        let mut buf = Buffer::new(vp.width(), vp.height);
+        draw(&mut buf, app, vp.height);
+        buf.flush(&mut out, vp.ox, vp.oy)?;
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match app.mode {
+                Mode::List => handle_list_key(app, key.code),
+                Mode::Edit => handle_edit_key(app, key.code, key.modifiers),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_list_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
+        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+        KeyCode::Left | KeyCode::Char('h') => app.target = Target::Env,
+        KeyCode::Right | KeyCode::Char('l') => app.target = Target::Local,
+        KeyCode::Tab => app.target = app.target.toggled(),
+        KeyCode::Enter => app.begin_edit(),
+        KeyCode::Char('s') => {
+            app.rescan();
+            app.message = "Rescanned".to_string();
+        }
+        _ => {}
+    }
+}
+
+fn handle_edit_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    match code {
+        KeyCode::Esc => {
+            app.mode = Mode::List;
+            app.message = "Edit cancelled".to_string();
+        }
+        KeyCode::Enter => app.confirm_edit(),
+        KeyCode::Backspace => {
+            app.edit.input.pop();
+        }
+        KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => {
+            app.edit.reveal = !app.edit.reveal;
+        }
+        KeyCode::Char(c) => {
+            if !mods.contains(KeyModifiers::CONTROL) {
+                app.edit.input.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn draw(buf: &mut Buffer, app: &App, height: u16) {
+    draw_header(buf, app);
+    draw_table(buf, app, height);
+    draw_footer(buf, app, height);
+}
+
+fn present(exists: bool) -> Style {
+    if exists {
+        Style::fg(Color::Green)
+    } else {
+        Style::fg(Color::DarkGrey)
+    }
+}
+
+fn draw_header(buf: &mut Buffer, app: &App) {
+    let w = buf.w;
+    let max_x = w.saturating_sub(1);
+    buf.draw_box(0, 0, w, 4, " wenv ", true, Style::new());
+    buf.put(1, 1, max_x, &app.dir.display().to_string(), Style::new().bold());
+    let mut x = buf.put(1, 2, max_x, "files: ", Style::new());
+    x = buf.put(x, 2, max_x, ".env", present(app.env.exists));
+    x = buf.put(x, 2, max_x, "  ", Style::new());
+    x = buf.put(x, 2, max_x, ".env.local", present(app.local.exists));
+    x = buf.put(x, 2, max_x, "  ", Style::new());
+    buf.put(x, 2, max_x, ".env.example", present(app.example.exists));
+}
+
+fn draw_table(buf: &mut Buffer, app: &App, height: u16) {
+    let w = buf.w;
+    let y0 = 4u16;
+    let table_h = height - 5;
+    let title = format!(" variables ({}) ", app.vars.len());
+    buf.draw_box(0, y0, w, table_h, &title, false, Style::new());
+
+    let inner_x = 1u16;
+    let max_x = w.saturating_sub(1);
+    let label_y = y0 + 1;
+    let first_row_y = y0 + 2;
+    let visible = (table_h as usize).saturating_sub(3);
+
+    // Column geometry: KEY then two equal file columns.
+    let longest = app.vars.iter().map(|v| v.key.chars().count() as u16).max().unwrap_or(6);
+    let avail = max_x.saturating_sub(inner_x);
+    let key_w = longest.clamp(6, avail.saturating_sub(20).max(6));
+    let gap = 1u16;
+    let env_x = inner_x + key_w + gap;
+    let file_w = max_x.saturating_sub(env_x).saturating_sub(gap) / 2;
+    let local_x = env_x + file_w + gap;
+
+    // Column labels; the active file column is highlighted.
+    buf.put(inner_x, label_y, env_x, "KEY", Style::new().dim());
+    let env_label = Style::fg(Color::Yellow).bold();
+    let local_label = Style::fg(Color::Yellow).bold();
+    let dim = Style::new().dim();
+    buf.put(env_x, label_y, local_x, ".env", if app.target == Target::Env { env_label } else { dim });
+    buf.put(local_x, label_y, max_x, ".env.local", if app.target == Target::Local { local_label } else { dim });
+
+    if app.vars.is_empty() {
+        buf.put(
+            inner_x,
+            first_row_y,
+            max_x,
+            "No variables found in .env / .env.local / .env.example.",
+            Style::fg(Color::DarkGrey),
+        );
+        return;
+    }
+
+    let sel = app.selected.unwrap_or(0);
+    let offset = if sel >= visible { sel + 1 - visible } else { 0 };
+
+    for (i, v) in app.vars.iter().enumerate().skip(offset).take(visible) {
+        let y = first_row_y + (i - offset) as u16;
+        let row_selected = app.selected == Some(i);
+        let key_style = if row_selected { Style::new().bold() } else { Style::new() };
+        buf.put(inner_x, y, env_x - gap, &trunc(&v.key, key_w), key_style);
+        draw_cell(buf, app, &v.key, Target::Env, env_x, y, env_x + file_w, row_selected);
+        draw_cell(buf, app, &v.key, Target::Local, local_x, y, local_x + file_w, row_selected);
+    }
+}
+
+fn draw_cell(buf: &mut Buffer, app: &App, key: &str, col: Target, x: u16, y: u16, max_x: u16, row_selected: bool) {
+    let active = row_selected && app.target == col;
+    buf.fill(x, y, max_x, Style::new().reversed_if(active));
+
+    if active && matches!(app.mode, Mode::Edit) {
+        let shown = if app.edit.reveal {
+            app.edit.input.clone()
+        } else {
+            "•".repeat(app.edit.input.chars().count())
+        };
+        let cap = (max_x.saturating_sub(x)).saturating_sub(1) as usize;
+        let text = clip_tail(&shown, cap);
+        let cx = buf.put(x, y, max_x, &text, Style::fg(Color::White).reversed_if(active));
+        buf.put(cx, y, max_x, "_", Style::fg(Color::White).reversed_if(active).blink());
+        return;
+    }
+
+    let (label, color) = match app.file(col).get(key).as_deref() {
+        None => ("unset".to_string(), Color::DarkGrey),
+        Some("") => ("empty".to_string(), Color::Yellow),
+        Some(v) => (fingerprint(v), Color::Green),
+    };
+    buf.put(x, y, max_x, &label, Style::fg(color).reversed_if(active));
+}
+
+fn draw_footer(buf: &mut Buffer, app: &App, height: u16) {
+    let y = height - 1;
+    let max_x = buf.w;
+    let help = match app.mode {
+        Mode::List => "\u{2191}\u{2193} row  \u{2190}\u{2192}/Tab file  Enter edit  s rescan  q quit",
+        Mode::Edit => "type value  Ctrl+R reveal  Enter save  Esc cancel",
+    };
+    if app.message.is_empty() {
+        buf.put(0, y, max_x, help, Style::new().dim());
+    } else {
+        let x = buf.put(0, y, max_x, &app.message, Style::fg(Color::Cyan));
+        let x = buf.put(x, y, max_x, "   ", Style::new());
+        buf.put(x, y, max_x, help, Style::new().dim());
+    }
+}
+
+/// A masked preview of a set value: a few leading and trailing chars so a secret
+/// can be recognized without being revealed. Short values show only length dots.
+fn fingerprint(v: &str) -> String {
+    const PRE: usize = 3;
+    const SUF: usize = 2;
+    let chars: Vec<char> = v.chars().collect();
+    let n = chars.len();
+    if n <= PRE + SUF + 1 {
+        return "\u{2022}".repeat(n.min(6));
+    }
+    let pre: String = chars[..PRE].iter().collect();
+    let suf: String = chars[n - SUF..].iter().collect();
+    format!("{}\u{2026}{}", pre, suf)
+}
+
+fn trunc(s: &str, w: u16) -> String {
+    let w = w as usize;
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= w {
+        s.to_string()
+    } else if w == 0 {
+        String::new()
+    } else {
+        let mut t: String = chars[..w - 1].iter().collect();
+        t.push('\u{2026}');
+        t
+    }
+}
+
+fn clip_tail(s: &str, width: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= width {
+        s.to_string()
+    } else {
+        chars[chars.len() - width..].iter().collect()
+    }
 }
 
 /// True when it's safe to emit ANSI color: stdout is a real terminal, NO_COLOR is
@@ -265,11 +467,9 @@ fn color_enabled() -> bool {
     if !std::io::stdout().is_terminal() {
         return false;
     }
-    // `crossterm::ansi_support` only exists on Windows, where it also enables VT
-    // processing. Elsewhere ANSI is assumed (honoring the conventional TERM=dumb).
     #[cfg(windows)]
     {
-        ratatui::crossterm::ansi_support::supports_ansi()
+        crossterm::ansi_support::supports_ansi()
     }
     #[cfg(not(windows))]
     {
@@ -278,7 +478,7 @@ fn color_enabled() -> bool {
 }
 
 fn print_summary(app: &App) {
-    use ratatui::crossterm::style::{Color, Stylize};
+    use crossterm::style::{Color, Stylize};
 
     let color = color_enabled();
     let paint = |s: &str, c: Color| -> String {
@@ -301,11 +501,7 @@ fn print_summary(app: &App) {
         Status::Unset => Color::DarkGrey,
     };
 
-    println!(
-        "{}  {}",
-        bold("wenv"),
-        paint(&app.dir.display().to_string(), Color::DarkGrey)
-    );
+    println!("{}  {}", bold("wenv"), paint(&app.dir.display().to_string(), Color::DarkGrey));
 
     if app.vars.is_empty() {
         println!(
@@ -316,12 +512,7 @@ fn print_summary(app: &App) {
         println!("  {}", bold("variables:"));
         for v in &app.vars {
             let tag = paint(&format!("{:<5}", status_word(v.status)), status_color(v.status));
-            println!(
-                "    [{}] {:<28} {}",
-                tag,
-                v.key,
-                paint(&format!("({})", v.source), Color::DarkGrey)
-            );
+            println!("    [{}] {:<28} {}", tag, v.key, paint(&format!("({})", v.source), Color::DarkGrey));
         }
     }
 
@@ -358,215 +549,4 @@ fn print_summary(app: &App) {
         paint(&empty.to_string(), Color::Yellow),
         paint(&unset.to_string(), Color::DarkGrey)
     );
-}
-
-fn run(terminal: &mut DefaultTerminal, app: &mut App) -> std::io::Result<()> {
-    while !app.quit {
-        terminal.draw(|f| draw(f, app))?;
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            match app.mode {
-                Mode::List => handle_list_key(app, key.code),
-                Mode::Edit => handle_edit_key(app, key.code, key.modifiers),
-            }
-        }
-    }
-    Ok(())
-}
-
-fn handle_list_key(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
-        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-        KeyCode::Enter => app.begin_edit(),
-        KeyCode::Tab => {
-            app.target = app.target.toggled();
-            app.message = format!("Write target: {}", app.target.filename());
-        }
-        KeyCode::Char('s') => {
-            app.rescan();
-            app.message = "Rescanned".to_string();
-        }
-        _ => {}
-    }
-}
-
-fn handle_edit_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
-    match code {
-        KeyCode::Esc => {
-            app.mode = Mode::List;
-            app.message = "Edit cancelled".to_string();
-        }
-        KeyCode::Enter => app.confirm_edit(),
-        KeyCode::Backspace => {
-            app.edit.input.pop();
-        }
-        KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => {
-            app.edit.reveal = !app.edit.reveal;
-        }
-        KeyCode::Char(c) => {
-            if !mods.contains(KeyModifiers::CONTROL) {
-                app.edit.input.push(c);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn draw(f: &mut Frame, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(f.area());
-
-    draw_header(f, app, chunks[0]);
-    draw_list(f, app, chunks[1]);
-    draw_footer(f, app, chunks[2]);
-
-    if let Mode::Edit = app.mode {
-        draw_edit_popup(f, app);
-    }
-}
-
-fn draw_header(f: &mut Frame, app: &App, area: Rect) {
-    let dir = app.dir.display().to_string();
-    let present = |name: &str, exists: bool| -> Span {
-        if exists {
-            Span::styled(name.to_string(), Style::default().fg(Color::Green))
-        } else {
-            Span::styled(name.to_string(), Style::default().fg(Color::DarkGray))
-        }
-    };
-    let files = Line::from(vec![
-        Span::raw("files: "),
-        present(".env", app.env.exists),
-        Span::raw("  "),
-        present(".env.local", app.local.exists),
-        Span::raw("  "),
-        present(".env.example", app.example.exists),
-    ]);
-    let target = Line::from(vec![
-        Span::raw("writing to: "),
-        Span::styled(
-            app.target.filename().to_string(),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("   (Tab to switch)"),
-    ]);
-    let body = vec![
-        Line::from(Span::styled(dir, Style::default().add_modifier(Modifier::BOLD))),
-        files,
-        target,
-    ];
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" wenv ")
-        .title_alignment(Alignment::Center);
-    f.render_widget(Paragraph::new(body).block(block), area);
-}
-
-fn draw_list(f: &mut Frame, app: &App, area: Rect) {
-    let items: Vec<ListItem> = if app.vars.is_empty() {
-        vec![ListItem::new(Line::from(Span::styled(
-            "No variables found in .env / .env.local / .env.example.",
-            Style::default().fg(Color::DarkGray),
-        )))]
-    } else {
-        app.vars
-            .iter()
-            .map(|v| {
-                let (label, color) = match v.status {
-                    Status::Set => ("set  ", Color::Green),
-                    Status::Empty => ("empty", Color::Yellow),
-                    Status::Unset => ("unset", Color::DarkGray),
-                };
-                let line = Line::from(vec![
-                    Span::styled(format!("[{}] ", label), Style::default().fg(color)),
-                    Span::raw(format!("{:<28}", v.key)),
-                    Span::styled(format!("({})", v.source), Style::default().fg(Color::DarkGray)),
-                ]);
-                ListItem::new(line)
-            })
-            .collect()
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" variables ({}) ", app.vars.len()));
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol("> ");
-    let mut state = app.list_state.clone();
-    f.render_stateful_widget(list, area, &mut state);
-}
-
-fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let help = match app.mode {
-        Mode::List => "up/down move  Enter edit  Tab target  s rescan  q quit",
-        Mode::Edit => "type value  Ctrl+R reveal  Enter save  Esc cancel",
-    };
-    let line = if app.message.is_empty() {
-        Line::from(Span::styled(help, Style::default().fg(Color::DarkGray)))
-    } else {
-        Line::from(vec![
-            Span::styled(app.message.clone(), Style::default().fg(Color::Cyan)),
-            Span::raw("   "),
-            Span::styled(help, Style::default().fg(Color::DarkGray)),
-        ])
-    };
-    f.render_widget(Paragraph::new(line), area);
-}
-
-fn draw_edit_popup(f: &mut Frame, app: &App) {
-    let area = centered_rect(70, 7, f.area());
-    f.render_widget(Clear, area);
-
-    let shown = if app.edit.reveal {
-        app.edit.input.clone()
-    } else {
-        "*".repeat(app.edit.input.chars().count())
-    };
-    let reveal_tag = if app.edit.reveal { "shown" } else { "masked" };
-
-    let body = vec![
-        Line::from(vec![
-            Span::raw("key: "),
-            Span::styled(
-                app.edit.key.clone(),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("target: "),
-            Span::styled(app.target.filename().to_string(), Style::default().fg(Color::Yellow)),
-        ]),
-        Line::from(vec![
-            Span::raw("value: "),
-            Span::styled(shown, Style::default().fg(Color::White)),
-            Span::styled("_", Style::default().fg(Color::White).add_modifier(Modifier::SLOW_BLINK)),
-            Span::styled(format!("  [{}]", reveal_tag), Style::default().fg(Color::DarkGray)),
-        ]),
-    ];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" set value ");
-    f.render_widget(Paragraph::new(body).block(block), area);
-}
-
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let w = width.min(area.width);
-    let h = height.min(area.height);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    Rect { x, y, width: w, height: h }
 }

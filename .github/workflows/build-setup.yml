@@ -1,0 +1,25 @@
+# Injected into dist's per-target build jobs via `github-build-setup` in
+# dist-workspace.toml. It builds the release binaries on nightly with a rebuilt
+# standard library (`build-std`) using the `immediate-abort` panic strategy,
+# which strips unwinding and panic-formatting machinery for a much smaller
+# binary. Every dist target builds natively on its own runner, so plain `rustup`
+# plus the `--target` dist already passes is all that's needed.
+#
+# Nothing here is committed into Cargo.toml/.cargo/config.toml on purpose: stable
+# rustc rejects the `-Z` flags, so the size build must stay scoped to this
+# nightly-only CI step and never touch local `cargo build` / `cargo test`.
+- name: Enable size-optimized nightly build (build-std + immediate-abort)
+  shell: bash
+  run: |
+    rustup toolchain install nightly --profile minimal --component rust-src
+    echo "RUSTUP_TOOLCHAIN=nightly" >> "$GITHUB_ENV"
+    echo "CARGO_UNSTABLE_BUILD_STD=std,panic_abort" >> "$GITHUB_ENV"
+    flags="-Zunstable-options -Cpanic=immediate-abort"
+    case "${{ join(matrix.targets, ' ') }}" in
+      *windows-msvc*)
+        # RUSTFLAGS (env) replaces, not merges with, .cargo/config.toml
+        # rustflags, so re-add crt-static to keep the Windows binary
+        # self-contained.
+        flags="$flags -C target-feature=+crt-static" ;;
+    esac
+    echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"

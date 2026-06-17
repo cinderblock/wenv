@@ -1,6 +1,6 @@
 [package]
 name = "wenv"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Cameron Tacklind <cameron@tacklind.com>"]
 description = "A terminal UI for viewing and setting .env secrets without revealing their values"
@@ -12,7 +12,6 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 crossterm = "0.29.0"
-ratatui = "0.30.1"
 
 [profile.release]
 opt-level = "z"   # optimize for size

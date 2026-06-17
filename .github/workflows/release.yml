@@ -127,6 +127,21 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Enable size-optimized nightly build (build-std + immediate-abort)"
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          echo "RUSTUP_TOOLCHAIN=nightly" >> "$GITHUB_ENV"
+          echo "CARGO_UNSTABLE_BUILD_STD=std,panic_abort" >> "$GITHUB_ENV"
+          flags="-Zunstable-options -Cpanic=immediate-abort"
+          case "${{ join(matrix.targets, ' ') }}" in
+            *windows-msvc*)
+              # RUSTFLAGS (env) replaces, not merges with, .cargo/config.toml
+              # rustflags, so re-add crt-static to keep the Windows binary
+              # self-contained.
+              flags="$flags -C target-feature=+crt-static" ;;
+          esac
+          echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
+        shell: "bash"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
