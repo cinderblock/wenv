@@ -226,7 +226,14 @@ impl App {
 }
 
 fn main() -> std::io::Result<()> {
-    let dir = env::current_dir()?;
+    let dir = match env::args_os().nth(1) {
+        Some(arg) => PathBuf::from(arg),
+        None => env::current_dir()?,
+    };
+    if !dir.is_dir() {
+        eprintln!("wenv: not a directory: {}", dir.display());
+        std::process::exit(2);
+    }
     let mut app = App::new(dir);
     // Inline viewport: render in a fixed region that stays in scrollback rather
     // than taking over the whole screen. Size to the var count, within bounds.

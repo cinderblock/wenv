@@ -45,6 +45,12 @@ cd your-project
 wenv
 ```
 
+You can also pass a directory to operate on instead of `cd`-ing into it:
+
+```sh
+wenv path/to/your-project
+```
+
 ### Keys
 
 | Key             | Action                                |

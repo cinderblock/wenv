@@ -1,6 +1,6 @@
 [package]
 name = "wenv"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Cameron Tacklind <cameron@tacklind.com>"]
 description = "A terminal UI for viewing and setting .env secrets without revealing their values"
