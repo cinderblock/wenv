@@ -1,0 +1,15 @@
+[package]
+name = "wenv"
+version = "0.1.0"
+edition = "2024"
+authors = ["Cameron Tacklind <cameron@tacklind.com>"]
+description = "A terminal UI for viewing and setting .env secrets without revealing their values"
+license = "MIT"
+repository = "https://github.com/cinderblock/wenv"
+readme = "README.md"
+keywords = ["dotenv", "env", "secrets", "tui", "cli"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+crossterm = "0.29.0"
+ratatui = "0.30.1"
