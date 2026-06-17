@@ -255,7 +255,19 @@ fn color_enabled() -> bool {
     if std::env::var_os("NO_COLOR").is_some() {
         return false;
     }
-    std::io::stdout().is_terminal() && ratatui::crossterm::ansi_support::supports_ansi()
+    if !std::io::stdout().is_terminal() {
+        return false;
+    }
+    // `crossterm::ansi_support` only exists on Windows, where it also enables VT
+    // processing. Elsewhere ANSI is assumed (honoring the conventional TERM=dumb).
+    #[cfg(windows)]
+    {
+        ratatui::crossterm::ansi_support::supports_ansi()
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("TERM").map_or(true, |t| t != "dumb")
+    }
 }
 
 fn print_summary(app: &App) {
