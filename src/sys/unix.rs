@@ -119,6 +119,23 @@ pub fn is_dir(path: &str) -> bool {
     }
 }
 
+pub fn exists(path: &str) -> bool {
+    let cpath = cstring(path);
+    unsafe { libc::access(cpath.as_ptr() as *const c_char, libc::F_OK) == 0 }
+}
+
+/// Local date as (year, month, day).
+pub fn today() -> (u16, u8, u8) {
+    unsafe {
+        let t: libc::time_t = libc::time(core::ptr::null_mut());
+        let mut tm: libc::tm = core::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return (1970, 1, 1);
+        }
+        ((tm.tm_year + 1900) as u16, (tm.tm_mon + 1) as u8, tm.tm_mday as u8)
+    }
+}
+
 pub fn args() -> Vec<String> {
     let argc = ARGC.load(Ordering::Relaxed);
     let argv = ARGV.load(Ordering::Relaxed) as *const *const u8;

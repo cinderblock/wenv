@@ -22,6 +22,9 @@ and anything you changed.
 - `Tab` (or `←`/`→`) chooses which file column you're editing.
 - Writes preserve existing comments, ordering, and blank lines, and quote values
   only when needed.
+- Before changing an existing file, saves a dated backup next to it
+  (`.env.YYYY-MM-DD.bak`, with `-1`, `-2`, … suffixes for multiple changes in a
+  day). Creating a new file or re-saving unchanged content makes no backup.
 - On quit, clears the UI and leaves a plain summary in your scrollback.
 - Tiny and self-contained: built `#![no_std]` with no C runtime and no external
   crates beyond `libc` on Unix. The binary depends only on libraries that ship

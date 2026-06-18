@@ -74,10 +74,25 @@ impl EnvFile {
     }
 
     /// Write the file back to disk. Returns false on failure.
+    ///
+    /// When overwriting an existing file whose contents actually change, the
+    /// previous on-disk version is first copied to a dated `.bak` file. If that
+    /// backup can't be written, the save is refused so nothing is lost.
     pub fn save(&mut self) -> bool {
         let mut content = self.lines.join("\n");
         if !content.is_empty() {
             content.push('\n');
+        }
+        if self.exists {
+            if let Some(original) = sys::read_file(&self.path) {
+                if original.as_slice() == content.as_bytes() {
+                    return true; // unchanged: nothing to write or back up
+                }
+                let backup = next_backup_path(&self.path);
+                if !sys::write_file(&backup, &original) {
+                    return false; // don't overwrite without a backup
+                }
+            }
         }
         if sys::write_file(&self.path, content.as_bytes()) {
             self.exists = true;
@@ -85,6 +100,25 @@ impl EnvFile {
         } else {
             false
         }
+    }
+}
+
+/// First free backup name of the form `<path>.YYYY-MM-DD.bak`, falling back to
+/// `<path>.YYYY-MM-DD-N.bak` (N starting at 1) when same-day backups exist.
+fn next_backup_path(path: &str) -> String {
+    let (y, m, d) = sys::today();
+    let base = format!("{}.{:04}-{:02}-{:02}", path, y, m, d);
+    let first = format!("{}.bak", base);
+    if !sys::exists(&first) {
+        return first;
+    }
+    let mut n: u32 = 1;
+    loop {
+        let candidate = format!("{}-{}.bak", base, n);
+        if !sys::exists(&candidate) {
+            return candidate;
+        }
+        n += 1;
     }
 }
 
@@ -232,6 +266,41 @@ mod tests {
         assert_eq!(f2.get("A").as_deref(), Some("new value!"));
         assert_eq!(f2.get("C").as_deref(), Some("added"));
         fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn backs_up_existing_file_on_change() {
+        let p = tmp("backup.env");
+        fs::write(&p, "A=old\nB=keep\n").unwrap();
+        let mut f = EnvFile::load(p.clone());
+        f.set("A", "new");
+        assert!(f.save());
+        // Main file has the new content.
+        assert_eq!(fs::read_to_string(&p).unwrap(), "A=new\nB=keep\n");
+        // A dated backup holds the original content.
+        let (y, m, d) = crate::sys::today();
+        let backup = format!("{}.{:04}-{:02}-{:02}.bak", p, y, m, d);
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "A=old\nB=keep\n");
+        fs::remove_file(&p).ok();
+        fs::remove_file(&backup).ok();
+    }
+
+    #[test]
+    fn no_backup_when_unchanged_or_new() {
+        // New file: created, no backup.
+        let p = tmp("nobackup.env");
+        let mut f = EnvFile::load(p.clone());
+        f.set("A", "1");
+        assert!(f.save());
+        let (y, m, d) = crate::sys::today();
+        let backup = format!("{}.{:04}-{:02}-{:02}.bak", p, y, m, d);
+        assert!(!std::path::Path::new(&backup).exists());
+        // Saving identical content again: no write, no backup.
+        let mut f2 = EnvFile::load(p.clone());
+        f2.set("A", "1");
+        assert!(f2.save());
+        assert!(!std::path::Path::new(&backup).exists());
+        fs::remove_file(&p).ok();
     }
 
     #[test]

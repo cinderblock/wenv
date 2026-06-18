@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-18
+
+### Added
+
+- Automatic backups: before changing an existing `.env`/`.env.local` file, wenv
+  copies the previous on-disk version to a dated `.bak` beside it
+  (`<file>.YYYY-MM-DD.bak`, then `-1`, `-2`, … for further changes the same day).
+  Creating a new file or re-saving identical content makes no backup, and a save
+  is refused if its backup cannot be written.
+
 ## [0.4.0] - 2026-06-17
 
 ### Changed
@@ -74,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prints a compact colored summary on quit; color is suppressed when stdout is
   not a terminal or `NO_COLOR` is set.
 
+[0.5.0]: https://github.com/cinderblock/wenv/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cinderblock/wenv/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cinderblock/wenv/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cinderblock/wenv/compare/v0.1.0...v0.2.0

@@ -64,6 +64,18 @@ struct ConsoleScreenBufferInfo {
 }
 
 #[repr(C)]
+struct SystemTime {
+    year: Word,
+    month: Word,
+    day_of_week: Word,
+    day: Word,
+    hour: Word,
+    minute: Word,
+    second: Word,
+    milliseconds: Word,
+}
+
+#[repr(C)]
 struct KeyEventRecord {
     key_down: Bool,
     repeat_count: Word,
@@ -89,6 +101,7 @@ unsafe extern "system" {
     fn CloseHandle(h: Handle) -> Bool;
     fn GetFileSizeEx(h: Handle, size: *mut i64) -> Bool;
     fn GetFileAttributesW(name: *const u16) -> Dword;
+    fn GetLocalTime(time: *mut SystemTime);
     fn GetCommandLineW() -> *const u16;
     fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, size: Dword) -> Dword;
     fn GetCurrentDirectoryW(size: Dword, buf: *mut u16) -> Dword;
@@ -201,6 +214,20 @@ pub fn is_dir(path: &str) -> bool {
     unsafe {
         let attr = GetFileAttributesW(w.as_ptr());
         attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0
+    }
+}
+
+pub fn exists(path: &str) -> bool {
+    let w = to_wide(path);
+    unsafe { GetFileAttributesW(w.as_ptr()) != INVALID_FILE_ATTRIBUTES }
+}
+
+/// Local date as (year, month, day).
+pub fn today() -> (u16, u8, u8) {
+    unsafe {
+        let mut st: SystemTime = core::mem::zeroed();
+        GetLocalTime(&mut st);
+        (st.year, st.month as u8, st.day as u8)
     }
 }
 
