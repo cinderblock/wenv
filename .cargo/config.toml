@@ -1,9 +1,4 @@
-# no_std / no-CRT build: we link only OS DLLs (kernel32, shell32 on Windows),
-# so there is no C runtime to statically link. The crate provides its own entry
-# point (mainCRTStartup in src/sys/windows.rs) and global allocator, so the
-# linker needs to be told the entry and subsystem explicitly.
-[target.x86_64-pc-windows-msvc]
-rustflags = [
-    "-C", "link-arg=/ENTRY:mainCRTStartup",
-    "-C", "link-arg=/SUBSYSTEM:CONSOLE",
-]
+# no_std / no-CRT build: we link only OS DLLs (kernel32, shell32 on Windows) and
+# the system libc on Unix, so there is no C runtime to statically link. The
+# Windows entry point and subsystem are passed via build.rs (robust against
+# tooling that sets RUSTFLAGS); the allocator and intrinsics live in src/.

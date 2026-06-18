@@ -17,3 +17,7 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+# Don't statically link the MSVC C runtime: this is a no-CRT build that links
+# only OS DLLs, and forcing crt-static would pull libcmt (bloat + symbol clashes
+# with our freestanding intrinsics).
+msvc-crt-static = false

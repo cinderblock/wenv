@@ -4,7 +4,7 @@
 extern crate alloc;
 
 mod env_file;
-#[cfg(all(windows, not(test)))]
+#[cfg(not(test))]
 mod rt;
 mod screen;
 mod sys;
